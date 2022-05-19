@@ -1,0 +1,37 @@
+# Copyright 2022 Scott Nichols
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: glass-broker-controller
+  namespace: knative-eventing
+  labels:
+    networking.knative.dev/visibility: cluster-local
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "1"
+        autoscaling.knative.dev/maxScale: "1"
+    spec:
+      serviceAccountName: eventing-controller
+      containers:
+      - image: ko://tableflip.dev/cyanogaster/cmd/controller
+        env:
+        - name: GLASS_BROKER_IMAGE
+          value: ko://tableflip.dev/cyanogaster/cmd/broker
+        - name: GLASS_BROKER_SERVICE_ACCOUNT
+          value: default # TODO, make a service account? default should be fine.
+        - name: SYSTEM_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: METRICS_DOMAIN
+          value: tableflip.dev/cyanogaster
+        securityContext:
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          capabilities:
+            drop:
+            - all
