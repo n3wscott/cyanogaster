@@ -1,0 +1,107 @@
+# Copyright 2022 Scott Nichols
+# SPDX-License-Identifier: Apache-2.0
+
+name: e2e-tests
+
+# Run on every push, and allow it to be run manually.
+on: [push, workflow_dispatch]
+
+permissions: read-all
+
+jobs:
+  e2e-tests:
+    name: Run tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false # Keep running if one leg fails.
+      matrix:
+        k8s-version:
+          - v1.21.x
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: chainguard-dev/actions/setup-mirror@main
+
+      # https://github.com/mvdan/github-actions-golang#how-do-i-set-up-caching-between-builds
+      - uses: actions/cache@v2
+        with:
+          # In order:
+          # * Module download cache
+          # * Build cache (Linux)
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            ${{ env.KOCACHE }}
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - uses: actions/setup-go@v3
+        with:
+          go-version: '1.17'
+          check-latest: true
+
+      - name: Set up `crane`
+        run: go install github.com/google/go-containerregistry/cmd/crane@v0.8.0
+
+      - name: Set up Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: 1.17.x
+
+      - uses: imjasonh/setup-ko@v0.4
+        with:
+          version: v0.10.0
+
+      - name: Setup Cluster
+        uses: chainguard-dev/actions/setup-kind@main
+        with:
+          k8s-version: ${{ matrix.k8s-version }}
+          registry-authority: registry.local:5000
+
+      - name: Setup Knative
+        # TODO: upstream setup-knative changes back to chainguard-dev/actions.
+        uses: ./.github/actions/setup-knative
+        with:
+          version: '1.3.0'
+          serving-features: '{"kubernetes.podspec-fieldref":"enabled", "kubernetes.podspec-volumes-emptydir":"enabled", "kubernetes.podspec-init-containers": "enabled", "kubernetes.podspec-securitycontext":"enabled"}'
+          serving-defaults: '{"revision-timeout-seconds":"30","container-concurrency":"100"}'
+          serving-autoscaler: '{"min-scale":"1","max-scale":"1"}'
+
+      - name: Install Cyanogaster
+        timeout-minutes: 10
+        run: |
+          ko apply -BRf ./config
+
+      - name: Install Cyanogaster
+        timeout-minutes: 10
+        run: |
+          kubectl apply -f - << EOF
+          apiVersion: eventing.knative.dev/v1
+          kind: Broker
+          metadata:
+            name: demo
+            annotations:
+              eventing.knative.dev/broker.class: GlassBroker
+          EOF
+
+          kubectl apply -f - << EOF
+          apiVersion: eventing.knative.dev/v1
+          kind: Trigger
+          metadata:
+            name: demo
+          spec:
+            broker: demo
+            filter:
+              attributes:
+                type: dev.chainguard.ingester.ingest.v1
+            subscriber:
+              uri: http://demo.demo-system.svc
+          EOF
+
+          kubectl wait --timeout 1m --for=condition=Ready Broker demo
+
+      - name: Collect diagnostics and upload
+        if: ${{ failure() }}
+        uses: chainguard-dev/actions/kind-diag@main

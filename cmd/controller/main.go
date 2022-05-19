@@ -6,9 +6,10 @@ SPDX-License-Identifier: Apache-2.0
 package main
 
 import (
+	"net/http"
+
 	"knative.dev/pkg/injection/sharedmain"
 	"knative.dev/pkg/signals"
-	"net/http"
 	"tableflip.dev/cyanogaster/pkg/reconciler/broker"
 	"tableflip.dev/cyanogaster/pkg/reconciler/trigger"
 )
