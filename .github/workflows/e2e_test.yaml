@@ -19,7 +19,6 @@ jobs:
           - v1.21.x
           - v1.22.x
           - v1.23.x
-          - v1.24.x
 
     env:
       KO_DOCKER_REPO: registry.local:5000/cyanogaster
