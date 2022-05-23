@@ -17,6 +17,9 @@ jobs:
       matrix:
         k8s-version:
           - v1.21.x
+          - v1.22.x
+          - v1.23.x
+          - v1.24.x
 
     env:
       KO_DOCKER_REPO: registry.local:5000/cyanogaster
@@ -77,7 +80,7 @@ jobs:
         run: |
           ko apply -BRf ./config
 
-      - name: Install Cyanogaster
+      - name: Smoketest Cyanogaster
         timeout-minutes: 10
         run: |
           kubectl apply -f - << EOF

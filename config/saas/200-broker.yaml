@@ -19,6 +19,8 @@ spec:
       containers:
       - image: ko://tableflip.dev/cyanogaster/cmd/controller
         env:
+        - name: KUBERNETES_MIN_VERSION
+          value: "v1.21.0"
         - name: GLASS_BROKER_IMAGE
           value: ko://tableflip.dev/cyanogaster/cmd/broker
         - name: GLASS_BROKER_SERVICE_ACCOUNT
