@@ -7,6 +7,7 @@ require (
 	github.com/google/go-cmp v0.5.8
 	github.com/hashicorp/golang-lru v0.5.4
 	github.com/kelseyhightower/envconfig v1.4.0
+	github.com/rickb777/date v1.13.0
 	go.opencensus.io v0.23.0
 	go.uber.org/zap v1.21.0
 	k8s.io/api v0.23.5
@@ -66,7 +67,6 @@ require (
 	github.com/prometheus/common v0.32.1 // indirect
 	github.com/prometheus/procfs v0.6.0 // indirect
 	github.com/prometheus/statsd_exporter v0.21.0 // indirect
-	github.com/rickb777/date v1.13.0 // indirect
 	github.com/rickb777/plural v1.2.1 // indirect
 	github.com/robfig/cron/v3 v3.0.1 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect

@@ -3,28 +3,23 @@ Copyright 2022 Scott Nichols
 SPDX-License-Identifier: Apache-2.0
 */
 
-package broker
+package dataplane
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/cloudevents/sdk-go/v2/types"
-	"github.com/kelseyhightower/envconfig"
 	"github.com/rickb777/date/period"
 	"go.opencensus.io/trace"
 	"go.uber.org/zap"
 	eventingduckv1 "knative.dev/eventing/pkg/apis/duck/v1"
 	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
 	"knative.dev/pkg/logging"
-	pkgtracing "knative.dev/pkg/tracing"
-	"tableflip.dev/cyanogaster/pkg/reconciler/broker/resources"
 )
 
 const (
@@ -34,64 +29,14 @@ const (
 	healthz = "/healthz"
 )
 
-// Handler parses Cloud Events, determines if they pass a filter, and sends them to a subscriber.
-type Handler struct {
-	logger   *zap.SugaredLogger
-	ceClient cloudevents.Client
-	isReady  *atomic.Value
-
-	TriggersJson string `envconfig:"TRIGGERS" required:"true"`
-	DeliveryJson string `envconfig:"DELIVERY" required:"true"`
-	triggers     []resources.Trigger
-	delivery     resources.Delivery
-}
-
 // FilterResult has the result of the filtering operation.
 type FilterResult string
 
-func NewBroker(logger *zap.SugaredLogger) (*Handler, error) {
-	r := &Handler{
-		logger:  logger,
-		isReady: &atomic.Value{},
-	}
-	r.isReady.Store(false)
-
-	httpTransport, err := cloudevents.NewHTTP(cloudevents.WithGetHandlerFunc(r.getHandler), cloudevents.WithMiddleware(pkgtracing.HTTPSpanIgnoringPaths(readyz)))
-	if err != nil {
-		return nil, err
-	}
-
-	ceClient, err := cloudevents.NewClient(httpTransport)
-	if err != nil {
-		return nil, err
-	}
-	r.ceClient = ceClient
-
-	if err := envconfig.Process("", r); err != nil {
-		return nil, err
-	}
-
-	r.triggers = make([]resources.Trigger, 0)
-	if err := json.Unmarshal([]byte(r.TriggersJson), &r.triggers); err != nil {
-		return nil, err
-	}
-
-	if err := json.Unmarshal([]byte(r.DeliveryJson), &r.delivery); err != nil {
-		return nil, err
-	}
-
-	httpTransport.Handler = http.NewServeMux()
-	httpTransport.Handler.HandleFunc(healthz, r.healthZ)
-	httpTransport.Handler.HandleFunc(readyz, r.readyZ)
-
-	return r, nil
-}
-
-func (r *Handler) healthZ(writer http.ResponseWriter, _ *http.Request) {
+func (r *Reconciler) healthZ(writer http.ResponseWriter, _ *http.Request) {
 	writer.WriteHeader(http.StatusOK)
 }
 
-func (r *Handler) readyZ(writer http.ResponseWriter, _ *http.Request) {
+func (r *Reconciler) readyZ(writer http.ResponseWriter, _ *http.Request) {
 	if r.isReady == nil || !r.isReady.Load().(bool) {
 		http.Error(writer, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
 		return
@@ -106,7 +51,7 @@ func (r *Handler) readyZ(writer http.ResponseWriter, _ *http.Request) {
 // server.
 //
 // This method will block until a message is received on the stop channel.
-func (r *Handler) Start(ctx context.Context) error {
+func (r *Reconciler) Start(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -140,50 +85,56 @@ func (r *Handler) Start(ctx context.Context) error {
 	}
 }
 
-func (r *Handler) getHandler(resp http.ResponseWriter, req *http.Request) {
+func (r *Reconciler) getHandler(resp http.ResponseWriter, req *http.Request) {
 	_, _ = resp.Write([]byte("hello"))
 }
 
 // sendEvent sends an event to a subscriber if the trigger filter passes.
-func (r *Handler) receiver(ctx context.Context, event cloudevents.Event) error {
+func (r *Reconciler) receiver(ctx context.Context, event cloudevents.Event) error {
 	r.logger.Infof("%s", event)
 
-	if r.delivery.Spec != nil && r.delivery.Spec.BackoffPolicy != nil {
+	if r.broker != nil && r.broker.Spec.Delivery != nil && r.broker.Spec.Delivery.BackoffPolicy != nil {
 		retry := 5
-		if r.delivery.Spec.Retry != nil {
-			retry = int(*r.delivery.Spec.Retry)
+		if r.broker.Spec.Delivery.Retry != nil {
+			retry = int(*r.broker.Spec.Delivery.Retry)
 		}
 		backoff := time.Millisecond * 10
-		if r.delivery.Spec.BackoffDelay != nil {
-			p, _ := period.Parse(*r.delivery.Spec.BackoffDelay)
+		if r.broker.Spec.Delivery.BackoffDelay != nil {
+			p, _ := period.Parse(*r.broker.Spec.Delivery.BackoffDelay)
 			backoff = p.DurationApprox()
 		}
 
-		if *r.delivery.Spec.BackoffPolicy == eventingduckv1.BackoffPolicyLinear {
+		if *r.broker.Spec.Delivery.BackoffPolicy == eventingduckv1.BackoffPolicyLinear {
 			ctx = cloudevents.ContextWithRetriesLinearBackoff(ctx, backoff, retry)
 		} else {
 			ctx = cloudevents.ContextWithRetriesExponentialBackoff(ctx, backoff, retry)
 		}
 	}
 
+	r.mux.Lock()
+	defer r.mux.Unlock()
+
+	r.logger.Info("Triggers:", len(r.triggers))
+
 	for _, trigger := range r.triggers {
-		if eventMatchesFilter(ctx, &event, trigger.AttributesFilter) {
-			r.logger.Infof("matched! [%s] -> %s", event.ID(), trigger.Subscriber.URL().String())
-			sendingCTX := cloudevents.ContextWithTarget(ctx, trigger.Subscriber.URL().String())
+		if eventMatchesFilter(ctx, &event, trigger.Spec.Filter.Attributes) {
+			r.logger.Infof("matched! [%s] -> %s", event.ID(), trigger.Status.SubscriberURI.URL().String())
+			sendingCTX := cloudevents.ContextWithTarget(ctx, trigger.Status.SubscriberURI.URL().String())
 			sendingCTX = trace.NewContext(sendingCTX, trace.FromContext(ctx))
 
 			if reply, result := r.ceClient.Request(sendingCTX, event); cloudevents.IsUndelivered(result) {
 				r.logger.Errorw("failed to send event", zap.Error(result))
 
 				// DLQ
-				if r.delivery.Status != nil && r.delivery.Status.DeadLetterSinkURI != nil {
+				if r.broker.Status.DeadLetterSinkURI != nil {
 					go func() {
-						dlqCTX := cloudevents.ContextWithTarget(ctx, r.delivery.Status.DeadLetterSinkURI.URL().String())
+						dlqCTX := cloudevents.ContextWithTarget(ctx, r.broker.Status.DeadLetterSinkURI.URL().String())
 						if result := r.ceClient.Send(dlqCTX, event); cloudevents.IsUndelivered(result) {
 							r.logger.Errorw("failed to dql", zap.Error(result))
 						}
 					}()
 				}
+				// TODO: DLQ overrides from trigger.
 
 			} else if reply != nil {
 				// OMG so much yolo...
@@ -195,7 +146,10 @@ func (r *Handler) receiver(ctx context.Context, event cloudevents.Event) error {
 					}
 				}()
 			}
+		} else {
+			r.logger.Infof("no match. [%s]", event.ID())
 		}
+
 	}
 	return nil
 }
