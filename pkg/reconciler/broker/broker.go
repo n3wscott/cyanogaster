@@ -81,7 +81,17 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, o *eventingv1.Broker) pk
 	logging.FromContext(ctx).Infow("Reconciling", zap.Any("Broker", o))
 
 	brokerInitializeConditions(&o.Status)
-	o.Status.ObservedGeneration = o.Generation
+
+	if deadLetterEnabled(o) {
+		dlqURI, err := r.uriResolver.URIFromDestinationV1(ctx, *o.Spec.Delivery.DeadLetterSink, o)
+		if err != nil {
+			logging.FromContext(ctx).Errorw("Unable to get the DeadLetterSink's URI", zap.Error(err))
+			// TODO: mark status of dld
+			o.Status.DeadLetterSinkURI = nil
+			return err
+		}
+		o.Status.DeadLetterSinkURI = dlqURI
+	}
 
 	name := resources.GenerateServiceName(o)
 	// TODO: use the lister to fetch the service?
@@ -104,7 +114,8 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, o *eventingv1.Broker) pk
 		Labels: resources.GetLabels(),
 	}
 
-	triggers, err := r.triggerLister.List(labels.Everything())
+	// TODO: need to filter by namespace.
+	triggers, err := r.triggerLister.Triggers(o.Namespace).List(labels.Everything())
 	if err != nil {
 		return err
 	}
@@ -151,4 +162,8 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, o *eventingv1.Broker) pk
 	}
 
 	return nil
+}
+
+func deadLetterEnabled(b *eventingv1.Broker) bool {
+	return b.Spec.Delivery != nil && b.Spec.Delivery.DeadLetterSink != nil
 }
