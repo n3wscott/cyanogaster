@@ -97,7 +97,7 @@ func NewController(
 				} else {
 					label := broker.ObjectMeta.Annotations[brokerreconciler.ClassAnnotationKey]
 					if label == BrokerClass {
-						impl.Enqueue(obj)
+						impl.Enqueue(broker)
 					}
 				}
 			}

@@ -42,6 +42,7 @@ type Reconciler struct {
 var _ brokerreconciler.Interface = (*Reconciler)(nil)
 
 func (r *Reconciler) ReconcileKind(ctx context.Context, o *eventingv1.Broker) pkgreconciler.Event {
+	logging.FromContext(ctx).Infow("Reconciling", zap.Any("Broker", o.Name), zap.Any("Name", r.name))
 	if o.Name != r.name {
 		return nil
 	}
