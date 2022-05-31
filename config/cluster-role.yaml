@@ -6,7 +6,24 @@ metadata:
   labels:
     app.kubernetes.io/version: devel
     app.kubernetes.io/name: knative-eventing
-    tableflip.dev/glass-broker: "viewer"
+aggregationRule:
+  clusterRoleSelectors:
+    - matchLabels:
+        duck.knative.dev/addressable: "true"
+    - matchLabels:
+        tableflip.dev/glass-broker: "true"
+rules: []
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: glass-broker-trigger-reconciler
+  labels:
+    app.kubernetes.io/version: devel
+    app.kubernetes.io/name: knative-eventing
+    tableflip.dev/glass-broker: "true"
 rules:
   - apiGroups:
       - ""
@@ -21,12 +38,28 @@ rules:
     resources:
       - "brokers"
       - "brokers/status"
+    verbs:
+      - "get"
+      - "list"
+      - "watch"
+  - apiGroups:
+      - "eventing.knative.dev"
+    resources:
       - "triggers"
       - "triggers/status"
     verbs:
       - "get"
       - "list"
       - "watch"
+      - "patch"
+      - "update"
+  - apiGroups:
+      - ""
+    resources:
+      - "events"
+    verbs:
+      - "patch"
+      - "create"
   - apiGroups:
       - "coordination.k8s.io"
     resources:

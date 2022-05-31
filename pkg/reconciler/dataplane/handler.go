@@ -8,6 +8,8 @@ package dataplane
 import (
 	"context"
 	"errors"
+	"github.com/cloudevents/sdk-go/v2/protocol/gochan"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -55,9 +57,18 @@ func (r *Reconciler) Start(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	ce, err := cloudevents.NewClient(gochan.New())
+	if err != nil {
+		log.Fatalf("failed to create client: %v", err)
+	}
+	r.ceChan = ce
+
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- r.ceClient.StartReceiver(ctx, r.receiver)
+		errCh <- r.ceClient.StartReceiver(ctx, r.ingress)
+	}()
+	go func() {
+		errCh <- r.ceChan.StartReceiver(ctx, r.receiver)
 	}()
 
 	// We are ready.
@@ -89,6 +100,15 @@ func (r *Reconciler) getHandler(resp http.ResponseWriter, req *http.Request) {
 	_, _ = resp.Write([]byte("hello"))
 }
 
+func (r *Reconciler) ingress(ctx context.Context, event cloudevents.Event) error {
+	r.logger.Infof("%s", event)
+	if result := r.ceChan.Send(ctx, event); cloudevents.IsUndelivered(result) {
+		r.logger.Errorw("failed to send event", zap.Error(result))
+		return cloudevents.NewHTTPResult(500, "unable to ingress")
+	}
+	return nil
+}
+
 // sendEvent sends an event to a subscriber if the trigger filter passes.
 func (r *Reconciler) receiver(ctx context.Context, event cloudevents.Event) error {
 	r.logger.Infof("%s", event)
@@ -111,45 +131,50 @@ func (r *Reconciler) receiver(ctx context.Context, event cloudevents.Event) erro
 		}
 	}
 
+	// Quickly collect the current matching triggers.
+	var triggers []*eventingv1.Trigger
 	r.mux.Lock()
-	defer r.mux.Unlock()
-
 	r.logger.Info("Triggers:", len(r.triggers))
-
 	for _, trigger := range r.triggers {
 		if eventMatchesFilter(ctx, &event, trigger.Spec.Filter.Attributes) {
 			r.logger.Infof("matched! [%s] -> %s", event.ID(), trigger.Status.SubscriberURI.URL().String())
-			sendingCTX := cloudevents.ContextWithTarget(ctx, trigger.Status.SubscriberURI.URL().String())
-			sendingCTX = trace.NewContext(sendingCTX, trace.FromContext(ctx))
-
-			if reply, result := r.ceClient.Request(sendingCTX, event); cloudevents.IsUndelivered(result) {
-				r.logger.Errorw("failed to send event", zap.Error(result))
-
-				// DLQ
-				if r.broker.Status.DeadLetterSinkURI != nil {
-					go func() {
-						dlqCTX := cloudevents.ContextWithTarget(ctx, r.broker.Status.DeadLetterSinkURI.URL().String())
-						if result := r.ceClient.Send(dlqCTX, event); cloudevents.IsUndelivered(result) {
-							r.logger.Errorw("failed to dql", zap.Error(result))
-						}
-					}()
-				}
-				// TODO: DLQ overrides from trigger.
-
-			} else if reply != nil {
-				// OMG so much yolo...
-				go func() {
-					sendingCTX := cloudevents.ContextWithTarget(ctx, "http://loalhost:8080") // TODO should be this ingress?
-					sendingCTX = trace.NewContext(sendingCTX, trace.FromContext(ctx))
-					if result := r.ceClient.Send(sendingCTX, *reply); cloudevents.IsUndelivered(result) {
-						r.logger.Errorw("failed to send reply", zap.Error(result))
-					}
-				}()
-			}
+			triggers = append(triggers, trigger)
 		} else {
 			r.logger.Infof("no match. [%s]", event.ID())
 		}
+	}
+	r.mux.Unlock()
 
+	// Then process the matching triggers one at a time.
+	for _, trigger := range triggers {
+		// TODO: this could be go routines and a worker pool here to not let a single trigger block the others.
+		sendingCTX := cloudevents.ContextWithTarget(ctx, trigger.Status.SubscriberURI.URL().String())
+		sendingCTX = trace.NewContext(sendingCTX, trace.FromContext(ctx))
+
+		if reply, result := r.ceClient.Request(sendingCTX, event); cloudevents.IsUndelivered(result) {
+			r.logger.Errorw("failed to send event", zap.Error(result))
+
+			// DLQ
+			if r.broker.Status.DeadLetterSinkURI != nil {
+				go func() {
+					dlqCTX := cloudevents.ContextWithTarget(ctx, r.broker.Status.DeadLetterSinkURI.URL().String())
+					if result := r.ceClient.Send(dlqCTX, event); cloudevents.IsUndelivered(result) {
+						r.logger.Errorw("failed to dql", zap.Error(result))
+					}
+				}()
+			}
+			// TODO: DLQ overrides from trigger.
+
+		} else if reply != nil {
+			// OMG so much yolo...
+			go func() {
+				sendingCTX := cloudevents.ContextWithTarget(ctx, "http://loalhost:8080") // TODO should be this ingress?
+				sendingCTX = trace.NewContext(sendingCTX, trace.FromContext(ctx))
+				if result := r.ceClient.Send(sendingCTX, *reply); cloudevents.IsUndelivered(result) {
+					r.logger.Errorw("failed to send reply", zap.Error(result))
+				}
+			}()
+		}
 	}
 	return nil
 }

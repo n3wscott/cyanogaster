@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/google/go-cmp/cmp"
 	"k8s.io/client-go/kubernetes"
 
 	"go.uber.org/zap"
@@ -93,7 +94,6 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, o *eventingv1.Broker) pk
 	args := &resources.Args{
 		Image:  r.image,
 		Broker: o,
-		Labels: resources.GetLabels(),
 	}
 
 	// Service Account
@@ -173,7 +173,7 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, o *eventingv1.Broker) pk
 			return err
 		}
 	} else if resources.IsOutOfDate(existing, desired) {
-		logging.FromContext(ctx).Info("Service was out of date.")
+		logging.FromContext(ctx).Info("Service was out of date.", cmp.Diff(existing, desired))
 		existing.Spec = desired.Spec
 		ksvc, err = r.servingClient.Services(o.Namespace).Update(ctx, existing, metav1.UpdateOptions{})
 		if err != nil {

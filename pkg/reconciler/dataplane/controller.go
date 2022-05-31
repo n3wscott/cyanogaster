@@ -7,6 +7,10 @@ package dataplane
 
 import (
 	"context"
+	"k8s.io/apimachinery/pkg/labels"
+	triggerreconciler "knative.dev/eventing/pkg/client/injection/reconciler/eventing/v1/trigger"
+	"knative.dev/pkg/resolver"
+	"knative.dev/pkg/system"
 	"log"
 	"net/http"
 	"sync/atomic"
@@ -14,7 +18,6 @@ import (
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/kelseyhightower/envconfig"
 	"go.uber.org/zap"
-	"k8s.io/client-go/tools/cache"
 	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
 	brokerinformer "knative.dev/eventing/pkg/client/injection/informers/eventing/v1/broker"
 	triggerinformer "knative.dev/eventing/pkg/client/injection/informers/eventing/v1/trigger"
@@ -22,8 +25,6 @@ import (
 	"knative.dev/pkg/configmap"
 	"knative.dev/pkg/controller"
 	"knative.dev/pkg/logging"
-	pkgreconciler "knative.dev/pkg/reconciler"
-	"knative.dev/pkg/system"
 	pkgtracing "knative.dev/pkg/tracing"
 )
 
@@ -49,12 +50,16 @@ func NewController(
 	triggerInformer := triggerinformer.Get(ctx)
 
 	r := &Reconciler{
-		name:          env.Name,
-		triggerLister: triggerInformer.Lister().Triggers(system.Namespace()),
-		logger:        logging.FromContext(ctx),
-		isReady:       &atomic.Value{},
+		brokerLister: brokerInformer.Lister(),
+		brokerClass:  BrokerClass,
+		name:         env.Name,
+		logger:       logging.FromContext(ctx),
+		isReady:      &atomic.Value{},
+		triggers:     make(map[string]*eventingv1.Trigger),
 	}
 	r.isReady.Store(false)
+
+	logging.FromContext(ctx).Info("Setting up event handlers")
 
 	httpTransport, err := cloudevents.NewHTTP(cloudevents.WithGetHandlerFunc(r.getHandler), cloudevents.WithMiddleware(pkgtracing.HTTPSpanIgnoringPaths(readyz)))
 	if err != nil {
@@ -70,25 +75,43 @@ func NewController(
 	}
 	r.ceClient = ceClient
 
-	impl := brokerreconciler.NewImpl(ctx, r, BrokerClass, func(impl *controller.Impl) controller.Options {
+	impl := triggerreconciler.NewImpl(ctx, r, func(impl *controller.Impl) controller.Options {
 		return controller.Options{
-			SkipStatusUpdates: true,
-			Concurrency:       1,
+			Concurrency: 1,
 		}
 	})
+	r.uriResolver = resolver.NewURIResolverFromTracker(ctx, impl.Tracker)
 
 	logging.FromContext(ctx).Info("Setting up event handlers")
 
-	brokerInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
-		FilterFunc: pkgreconciler.AnnotationFilterFunc(brokerreconciler.ClassAnnotationKey, BrokerClass, false /*allowUnset*/),
-		Handler:    controller.HandleAll(impl.Enqueue),
-	})
+	brokerInformer.Informer().AddEventHandler(controller.HandleAll(
+		func(obj interface{}) {
+			if broker, ok := obj.(*eventingv1.Broker); ok {
+				if broker.Namespace != system.Namespace() {
+					return
+				}
+				label := broker.ObjectMeta.Annotations[brokerreconciler.ClassAnnotationKey]
+				if label != BrokerClass || env.Name != broker.Name {
+					return
+				}
+				triggers, err := triggerInformer.Lister().Triggers(broker.Namespace).List(labels.Everything())
+				if err != nil {
+					log.Print("Failed to lookup Triggers for Broker", zap.Error(err))
+				} else {
+					for _, t := range triggers {
+						if t.Spec.Broker == broker.Name {
+							impl.Enqueue(t)
+						}
+					}
+				}
+			}
+		},
+	))
 
 	triggerInformer.Informer().AddEventHandler(controller.HandleAll(
 		func(obj interface{}) {
 			if trigger, ok := obj.(*eventingv1.Trigger); ok {
-				// Namespace filtering
-				if trigger.Namespace != system.Namespace() {
+				if trigger.Namespace != system.Namespace() || trigger.Spec.Broker != env.Name {
 					return
 				}
 				broker, err := brokerInformer.Lister().Brokers(trigger.Namespace).Get(trigger.Spec.Broker)
@@ -96,9 +119,10 @@ func NewController(
 					log.Print("Failed to lookup Broker for Trigger", zap.Error(err))
 				} else {
 					label := broker.ObjectMeta.Annotations[brokerreconciler.ClassAnnotationKey]
-					if label == BrokerClass {
-						impl.Enqueue(broker)
+					if label != BrokerClass {
+						return
 					}
+					impl.Enqueue(obj)
 				}
 			}
 		},

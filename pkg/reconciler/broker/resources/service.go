@@ -20,27 +20,30 @@ func GenerateServiceName(broker *eventingv1.Broker) string {
 	return strings.ToLower(fmt.Sprintf("%s-glass-broker", broker.Name))
 }
 
-func GetLabels() map[string]string {
-	return map[string]string{}
-}
-
 type Args struct {
 	Broker *eventingv1.Broker
 	Image  string
-	Labels map[string]string
 }
 
 func IsOutOfDate(a, b *servingv1.Service) bool {
 	at := a.Spec.ConfigurationSpec.Template
 	bt := b.Spec.ConfigurationSpec.Template
-	if at.Spec.Containers[0].Image != bt.Spec.Containers[0].Image {
-		return true
-	}
-	if !cmp.Equal(at.Spec.Containers[0].Env, bt.Spec.Containers[0].Env) {
-		return true
+	for _, ac := range at.Spec.Containers {
+		if ac.Name == "user-container" {
+			for _, bc := range bt.Spec.Containers {
+				if bc.Name == ac.Name {
+					if ac.Image != bc.Image {
+						return true
+					}
+					if !cmp.Equal(ac.Env, bc.Env) {
+						return true
+					}
+				}
+			}
+		}
 	}
 
-	return !cmp.Equal(at.ObjectMeta.Labels, bt.ObjectMeta.Labels)
+	return false
 }
 
 func makePodSpec(args *Args) corev1.PodSpec {
@@ -70,14 +73,12 @@ func MakeService(args *Args) *servingv1.Service {
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace:       args.Broker.Namespace,
 			Name:            GenerateServiceName(args.Broker),
-			Labels:          args.Labels,
 			OwnerReferences: []metav1.OwnerReference{*kmeta.NewControllerRef(args.Broker)},
 		},
 		Spec: servingv1.ServiceSpec{
 			ConfigurationSpec: servingv1.ConfigurationSpec{
 				Template: servingv1.RevisionTemplateSpec{
 					ObjectMeta: metav1.ObjectMeta{
-						Labels: args.Labels,
 						Annotations: map[string]string{
 							"autoscaling.knative.dev/minScale": "1",
 							"autoscaling.knative.dev/maxScale": "1",

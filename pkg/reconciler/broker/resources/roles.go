@@ -17,7 +17,6 @@ func MakeServiceAccount(args *Args) *corev1.ServiceAccount {
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace:       args.Broker.Namespace,
 			Name:            GenerateServiceName(args.Broker),
-			Labels:          args.Labels,
 			OwnerReferences: []metav1.OwnerReference{*kmeta.NewControllerRef(args.Broker)},
 		},
 	}
@@ -28,7 +27,6 @@ func MakeBinding(args *Args) *rbacv1.ClusterRoleBinding {
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace:       args.Broker.Namespace,
 			Name:            GenerateServiceName(args.Broker) + "-" + args.Broker.Namespace,
-			Labels:          args.Labels,
 			OwnerReferences: []metav1.OwnerReference{*kmeta.NewControllerRef(args.Broker)},
 		},
 		Subjects: []rbacv1.Subject{{

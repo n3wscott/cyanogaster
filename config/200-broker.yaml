@@ -22,7 +22,7 @@ spec:
         - name: KUBERNETES_MIN_VERSION
           value: "v1.21.0"
         - name: GLASS_BROKER_IMAGE
-          value: ko://tableflip.dev/cyanogaster/cmd/broker
+          value: ko://tableflip.dev/cyanogaster/cmd/dataplane
         - name: GLASS_BROKER_SERVICE_ACCOUNT
           value: default # TODO, make a service account? default should be fine.
         - name: SYSTEM_NAMESPACE
