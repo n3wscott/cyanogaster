@@ -78,6 +78,21 @@ func NewController(
 	impl := triggerreconciler.NewImpl(ctx, r, func(impl *controller.Impl) controller.Options {
 		return controller.Options{
 			Concurrency: 1,
+			PromoteFilterFunc: func(obj interface{}) bool {
+				if trigger, ok := obj.(*eventingv1.Trigger); ok {
+					if trigger.Namespace != system.Namespace() || trigger.Spec.Broker != env.Name {
+						return false
+					}
+					broker, err := brokerInformer.Lister().Brokers(trigger.Namespace).Get(trigger.Spec.Broker)
+					if err != nil {
+						log.Print("Failed to lookup Broker for Trigger", zap.Error(err))
+					} else {
+						label := broker.ObjectMeta.Annotations[brokerreconciler.ClassAnnotationKey]
+						return label != BrokerClass
+					}
+				}
+				return false
+			},
 		}
 	})
 	r.uriResolver = resolver.NewURIResolverFromTracker(ctx, impl.Tracker)
