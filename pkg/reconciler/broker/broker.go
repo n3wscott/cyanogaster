@@ -9,16 +9,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/google/go-cmp/cmp"
+	"k8s.io/client-go/kubernetes"
 
 	"go.uber.org/zap"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
 	clientset "knative.dev/eventing/pkg/client/clientset/versioned"
 	brokerreconciler "knative.dev/eventing/pkg/client/injection/reconciler/eventing/v1/broker"
 	eventinglisters "knative.dev/eventing/pkg/client/listers/eventing/v1"
-	"knative.dev/eventing/pkg/duck"
 	"knative.dev/pkg/apis"
 	"knative.dev/pkg/logging"
 	pkgreconciler "knative.dev/pkg/reconciler"
@@ -30,9 +30,13 @@ import (
 
 // HACK HACK HACK
 // this is going to manage custom a custom condition set for this broker.
+const (
+	ConditionService apis.ConditionType = "Service"
+)
 
 var brokerCondSet = apis.NewLivingConditionSet(
 	eventingv1.BrokerConditionAddressable,
+	ConditionService,
 )
 
 // InitializeConditions sets relevant unset conditions to Unknown state.
@@ -58,24 +62,18 @@ type Reconciler struct {
 
 	// listers index properties about resources
 	brokerLister  eventinglisters.BrokerLister
-	triggerLister eventinglisters.TriggerLister
 	servingClient servingv1.ServingV1Interface
+
+	kubeClient kubernetes.Interface
 
 	image string
 
-	// Dynamic tracker to track KResources. In particular, it tracks the dependency between Triggers and Sources.
-	kresourceTracker duck.ListableTracker
-
-	// Dynamic tracker to track AddressableTypes. In particular, it tracks DLX sinks.
-	addressableTracker duck.ListableTracker
-	uriResolver        *resolver.URIResolver
-
-	// If specified, only reconcile brokers with these labels
-	brokerClass string
+	uriResolver *resolver.URIResolver
 }
 
 // Check that our Reconciler implements Interface
 var _ brokerreconciler.Interface = (*Reconciler)(nil)
+var _ brokerreconciler.Finalizer = (*Reconciler)(nil)
 
 func (r *Reconciler) ReconcileKind(ctx context.Context, o *eventingv1.Broker) pkgreconciler.Event {
 	logging.FromContext(ctx).Infow("Reconciling", zap.Any("Broker", o))
@@ -94,6 +92,62 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, o *eventingv1.Broker) pk
 	}
 
 	name := resources.GenerateServiceName(o)
+	args := &resources.Args{
+		Image:  r.image,
+		Broker: o,
+	}
+
+	// Service Account
+	{
+		// TODO: use the lister to fetch?
+		existing, err := r.kubeClient.CoreV1().ServiceAccounts(o.Namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			if !apierrors.IsNotFound(err) {
+				logging.FromContext(ctx).Errorw("Unable to get an existing ServiceAccount", zap.Error(err))
+				return err
+			}
+			existing = nil
+		} else if !metav1.IsControlledBy(existing, o) {
+			s, _ := json.Marshal(existing)
+			logging.FromContext(ctx).Errorw("Broker does not own ServiceAccount", zap.Any("serviceAccount", s))
+			return fmt.Errorf("Broker %q does not own ServiceAccount: %q", o.Name, name)
+		}
+		desired := resources.MakeServiceAccount(args)
+		if existing == nil {
+			_, err = r.kubeClient.CoreV1().ServiceAccounts(o.Namespace).Create(ctx, desired, metav1.CreateOptions{})
+			if err != nil {
+				logging.FromContext(ctx).Errorw("Failed to create broker service account", zap.Error(err))
+				return err
+			}
+		}
+	}
+
+	// Role Binding
+	{
+		name := name + "-" + args.Broker.Namespace
+		// TODO: use the lister to fetch?
+		existing, err := r.kubeClient.RbacV1().ClusterRoleBindings().Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			if !apierrors.IsNotFound(err) {
+				logging.FromContext(ctx).Errorw("Unable to get an existing ClusterRoleBinding", zap.Error(err))
+				return err
+			}
+			existing = nil
+		} else if !metav1.IsControlledBy(existing, o) {
+			s, _ := json.Marshal(existing)
+			logging.FromContext(ctx).Errorw("Broker does not own ServiceAccount", zap.Any("serviceAccount", s))
+			return fmt.Errorf("Broker %q does not own ClusterRoleBinding: %q", o.Name, name)
+		}
+		desired := resources.MakeBinding(args)
+		if existing == nil {
+			_, err = r.kubeClient.RbacV1().ClusterRoleBindings().Create(ctx, desired, metav1.CreateOptions{})
+			if err != nil {
+				logging.FromContext(ctx).Errorw("Failed to create ClusterRoleBinding", zap.Error(err))
+				return err
+			}
+		}
+	}
+
 	// TODO: use the lister to fetch the service?
 	existing, err := r.servingClient.Services(o.Namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
@@ -108,32 +162,6 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, o *eventingv1.Broker) pk
 		return fmt.Errorf("Broker %q does not own Service: %q", o.Name, name)
 	}
 
-	args := &resources.Args{
-		Image:  r.image,
-		Broker: o,
-		Labels: resources.GetLabels(),
-	}
-
-	// TODO: need to filter by namespace.
-	triggers, err := r.triggerLister.Triggers(o.Namespace).List(labels.Everything())
-	if err != nil {
-		return err
-	}
-	for _, trigger := range triggers {
-		if trigger.Spec.Broker == o.Name {
-			if trigger.Status.SubscriberURI != nil {
-				var af eventingv1.TriggerFilterAttributes
-				if trigger.Spec.Filter != nil && trigger.Spec.Filter.Attributes != nil {
-					af = trigger.Spec.Filter.Attributes
-				}
-				args.AddTrigger(resources.Trigger{
-					AttributesFilter: af,
-					Subscriber:       trigger.Status.SubscriberURI,
-				})
-			}
-		}
-	}
-
 	desired := resources.MakeService(args)
 
 	logging.FromContext(ctx).Info("Made a service, comparing it now..")
@@ -146,12 +174,22 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, o *eventingv1.Broker) pk
 			return err
 		}
 	} else if resources.IsOutOfDate(existing, desired) {
-		logging.FromContext(ctx).Info("Service was out of date.")
+		logging.FromContext(ctx).Info("Service was out of date.", cmp.Diff(existing, desired))
 		existing.Spec = desired.Spec
 		ksvc, err = r.servingClient.Services(o.Namespace).Update(ctx, existing, metav1.UpdateOptions{})
 		if err != nil {
 			logging.FromContext(ctx).Errorw("Failed to update broker service", zap.Any("service", existing), zap.Error(err))
 			return err
+		}
+	}
+
+	if kr := ksvc.Status.GetCondition(apis.ConditionReady); kr != nil {
+		if kr.IsTrue() {
+			brokerCondSet.Manage(&o.Status).MarkTrue(ConditionService)
+		} else if kr.IsUnknown() {
+			brokerCondSet.Manage(&o.Status).MarkUnknown(ConditionService, kr.Reason, kr.Message)
+		} else {
+			brokerCondSet.Manage(&o.Status).MarkFalse(ConditionService, kr.Reason, kr.Message)
 		}
 	}
 
@@ -161,6 +199,13 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, o *eventingv1.Broker) pk
 		brokerSetAddress(&o.Status, nil)
 	}
 
+	return nil
+}
+
+func (r *Reconciler) FinalizeKind(ctx context.Context, o *eventingv1.Broker) pkgreconciler.Event {
+	// Delete Role Binding
+	name := resources.GenerateServiceName(o) + "-" + o.Namespace
+	_ = r.kubeClient.RbacV1().ClusterRoleBindings().Delete(ctx, name, metav1.DeleteOptions{})
 	return nil
 }
 

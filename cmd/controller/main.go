@@ -11,7 +11,6 @@ import (
 	"knative.dev/pkg/injection/sharedmain"
 	"knative.dev/pkg/signals"
 	"tableflip.dev/cyanogaster/pkg/reconciler/broker"
-	"tableflip.dev/cyanogaster/pkg/reconciler/trigger"
 )
 
 func main() {
@@ -22,6 +21,5 @@ func main() {
 
 	sharedmain.MainWithContext(signals.NewContext(), "controller",
 		broker.NewController,
-		trigger.NewController,
 	)
 }
