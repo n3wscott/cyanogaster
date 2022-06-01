@@ -73,6 +73,7 @@ type Reconciler struct {
 
 // Check that our Reconciler implements Interface
 var _ brokerreconciler.Interface = (*Reconciler)(nil)
+var _ brokerreconciler.Finalizer = (*Reconciler)(nil)
 
 func (r *Reconciler) ReconcileKind(ctx context.Context, o *eventingv1.Broker) pkgreconciler.Event {
 	logging.FromContext(ctx).Infow("Reconciling", zap.Any("Broker", o))
@@ -198,6 +199,13 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, o *eventingv1.Broker) pk
 		brokerSetAddress(&o.Status, nil)
 	}
 
+	return nil
+}
+
+func (r *Reconciler) FinalizeKind(ctx context.Context, o *eventingv1.Broker) pkgreconciler.Event {
+	// Delete Role Binding
+	name := resources.GenerateServiceName(o) + "-" + o.Namespace
+	_ = r.kubeClient.RbacV1().ClusterRoleBindings().Delete(ctx, name, metav1.DeleteOptions{})
 	return nil
 }
 

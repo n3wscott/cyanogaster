@@ -88,7 +88,7 @@ func NewController(
 						log.Print("Failed to lookup Broker for Trigger", zap.Error(err))
 					} else {
 						label := broker.ObjectMeta.Annotations[brokerreconciler.ClassAnnotationKey]
-						return label != BrokerClass
+						return label == BrokerClass
 					}
 				}
 				return false
@@ -129,6 +129,12 @@ func NewController(
 				if trigger.Namespace != system.Namespace() || trigger.Spec.Broker != env.Name {
 					return
 				}
+
+				// Observe deletions directly.
+				if trigger.DeletionTimestamp != nil {
+					r.removeTrigger(context.Background(), trigger)
+				}
+
 				broker, err := brokerInformer.Lister().Brokers(trigger.Namespace).Get(trigger.Spec.Broker)
 				if err != nil {
 					log.Print("Failed to lookup Broker for Trigger", zap.Error(err))

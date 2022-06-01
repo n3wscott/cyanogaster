@@ -63,7 +63,6 @@ func triggerMarkSubscriberResolvedFailed(ts *eventingv1.TriggerStatus, reason, m
 
 // Check that our Reconciler implements Interface
 var _ triggerreconciler.Interface = (*Reconciler)(nil)
-var _ triggerreconciler.Finalizer = (*Reconciler)(nil)
 
 func (r *Reconciler) ReconcileKind(ctx context.Context, o *eventingv1.Trigger) pkgreconciler.Event {
 	logging.FromContext(ctx).Info("Reconciling", zap.Any("Trigger", o))
@@ -96,14 +95,15 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, o *eventingv1.Trigger) p
 	return nil
 }
 
-func (r *Reconciler) FinalizeKind(ctx context.Context, o *eventingv1.Trigger) pkgreconciler.Event {
-	r.removeTrigger(ctx, o)
-
-	return nil
-}
+//func (r *Reconciler) FinalizeKind(ctx context.Context, o *eventingv1.Trigger) pkgreconciler.Event {
+//	r.removeTrigger(ctx, o)
+//
+//	return nil
+//}
 
 func (r *Reconciler) removeTrigger(ctx context.Context, o *eventingv1.Trigger) {
 	r.mux.Lock()
+	logging.FromContext(ctx).Infof("Delete trigger %s", o.Name)
 	delete(r.triggers, o.Name)
 	r.mux.Unlock()
 
